@@ -402,3 +402,121 @@ class TestDataset(data.Dataset):
 
     def __len__(self):
         return self.len
+
+class OutputDataset(data.Dataset):
+    def __init__(self, dataset_name, split_low, split_high, max_group_member=5, max_scene_item=17):
+        self.dataset_name = dataset_name
+        self.Umap, self.Imap, self.Vitem, self.Kitem, self.Vusers, self.Kusers, self.Gmap, self.scenes = initial_load(dataset_name)
+        self.IIedge, self.IIvalue, self.UUedge, self.UUvalue, self.UIedge, self.UIvalue = get_graph_edge(dataset_name, mode='True')
+        self.index = get_index(dataset_name, mode='test')
+        self.len = len(self.index)
+        self.max_group_member = max_group_member
+        self.max_scene_item = max_scene_item
+
+    def __getitem__(self, idx):
+        group, scene = self.index[idx]
+        Vitem = self.scenes[scene]
+        user = self.Gmap[group]
+        Vid = user.copy()
+        for i in range(self.max_group_member-len(user)):
+            Vid.append(-1)
+        Kid = Vid.copy()
+        
+        Vuser = torch.cat([torch.unsqueeze(self.Vusers[user[i]], 0) if i<len(user) else torch.zeros((1,256)) for i in range(self.max_group_member)], dim=0)
+        Kuser = torch.cat([torch.unsqueeze(self.Kusers[user[i]], 0) if i<len(user) else torch.zeros((1,256)) for i in range(self.max_group_member)], dim=0)
+        
+        Vgraph = torch.cat([torch.unsqueeze(self.Vitem[i,:], 0) for i in Vitem], dim=0)
+        Vgraph = torch.cat([Vuser, Vgraph], dim=0)
+
+        with open('../data/{}/data/proposed/{}/group{}_scene{}.txt'.format(self.dataset_name, 'test', group, scene), 'r') as f:
+            UUidx = f.readline().strip('\n').split('\t')
+            UUidx = [int(float(i)) for i in UUidx]
+            UIidx = f.readline().strip('\n').split('\t')
+            UIidx = [int(float(i)) for i in UIidx]
+            pid = f.readline().strip('\n').split('\t')
+            pid = [int(float(i)) for i in pid]
+            nid = f.readline().strip('\n').split('\t')
+            nid = [int(float(i)) for i in nid]
+        
+        if len(pid)>20:
+            random.shuffle(pid)
+            pid = pid[:20]
+        random.shuffle(nid)
+        nid = nid[:20]
+
+        Tmap = dict()
+        Tcnt = 0
+        for u in user:
+            Tmap[u] = Tcnt
+            Tcnt+=1
+        if len(Tmap)<self.max_group_member:
+            Tmap[-1] = Tcnt
+            Tcnt+=1
+        for u in nid:
+            Tmap[u] = Tcnt
+            Tcnt+=1
+        for u in pid:
+            Tmap[u] = Tcnt
+            Tcnt+=1
+        
+        Kuser = torch.cat([Kuser.clone(), self.Kusers[nid], self.Kusers[pid]], dim=0)
+        Kedge = [list(), list()]
+        Kvalue = list()
+        for i in UUidx:
+            if self.UUedge[0,i] in Tmap and self.UUedge[1,i] in Tmap:#self.UUvalue[i]>0.23 
+                Kedge[0].append(Tmap[self.UUedge[0,i]])
+                Kedge[1].append(Tmap[self.UUedge[1,i]])
+                Kvalue.append(self.UUvalue[i])
+        for i in UIidx:
+            if self.UIedge[0,i] in Tmap:
+                Kedge[0].append(Tmap[self.UIedge[0,i]])
+                Kedge[1].append(self.UIedge[1,i]+Kuser.shape[0])
+                Kvalue.append(self.UIvalue[i])
+
+        Kgraph = torch.cat([Kuser, self.Kitem], dim=0)
+        
+        Kid.extend(nid)
+        Kid.extend(pid)
+        Kid.extend([i for i in range(len(self.Imap))])
+        Vid.extend(Vitem)
+
+        Kitem = list()
+        for i in range(len(self.Imap)):
+            if i not in Vitem:
+                Kitem.append(i)
+
+################################ make vedge #################################
+        invUser = dict()
+        cnt=0
+        for u in user:
+            invUser[u] = cnt
+            cnt+=1
+        invItem = dict()
+        cnt=0
+        for i in Vitem:
+            invItem[i] = cnt
+            cnt+=1
+
+        Vedge = [list(), list()]
+        Vvalue = list()
+        user_t = set(user)
+        Vitem_t = set(Vitem)
+
+        VUU_adj = torch.eye(self.max_group_member)
+        KUU_adj = torch.eye(Tcnt)
+        Vpreference = torch.zeros(len(Vitem_t), self.max_group_member)
+        for i in range(self.UUedge.shape[1]):
+            if self.UUedge[0,i] in user_t and self.UUedge[1,i] in user_t:#UUvalue[i]>0.23 and 
+                Vedge[0].append(invUser[self.UUedge[0,i]])
+                Vedge[1].append(invUser[self.UUedge[1,i]])
+                Vvalue.append(self.UUvalue[i])
+        for i in range(self.UIedge.shape[1]):
+            if self.UIedge[0,i] in user_t and self.UIedge[1,i] in Vitem_t:
+                Vedge[0].append(invUser[self.UIedge[0,i]])
+                Vedge[1].append(invItem[self.UIedge[1,i]]+self.max_group_member)
+                Vvalue.append(self.UIvalue[i])
+
+        return Vgraph, torch.tensor(Vedge), torch.tensor(Vvalue), Kgraph, np.array(Kedge), np.array(Kvalue), np.array(Vid), np.array(Kid), np.array(Vitem), np.array(Kitem)
+
+    def __len__(self):
+        return self.len
